@@ -1,7 +1,7 @@
 # st2195_assignment_8
 Repository for S &amp; T
 
-Data used: The titanic dataset from Kaggle.com
+Data used: The titanic dataset from Kaggle.com & exports data from IMF Direction of Trade Statistic
 
 The 8th member (EU) is excluded from the data
 
