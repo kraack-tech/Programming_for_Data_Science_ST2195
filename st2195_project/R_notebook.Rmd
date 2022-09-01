@@ -1,0 +1,1015 @@
+---
+title: "R_notebook"
+output: pdf_document
+---
+
+```{r}
+#import librarys
+library('dplyr')
+library('data.table')
+library('ggplot2')
+library('reshape2')
+library('RColorBrewer')
+library('ggrepel')
+library('lubridate')
+library('chron')
+library('janitor')
+library('purrr')
+```
+
+```{r}
+#read variables
+airports <- read.csv("airports.csv")
+carriers <- read.csv("carriers.csv")
+airplanes <- read.csv("plane-data.csv")
+
+#read data
+df1 <- read.csv("2006.csv")
+df2 <- read.csv("2007.csv")
+df3 <- read.csv("2008.csv")
+
+#datas without cancelled and diverted flights.
+
+df1 <- df1 %>% filter(Cancelled == 0 & Diverted == 0)
+df2 <- df2 %>% filter(Cancelled == 0 & Diverted == 0)
+
+#explore data
+df1
+df2
+```
+
+```{r}
+#dataset sizes 
+nrow(df1)
+nrow(df2)
+```
+
+```{r}
+#sample to match size and avoid potential bias towards 2007
+df2 <- sample_n(df2, 7003802)
+nrow(df2) #verify
+```
+```{r}
+# join dataframes
+df <- df1 %>% full_join(df2) #join
+
+#create delay column
+df$delay <- (df$ArrDelay+df$DepDelay)
+```
+
+```{r}
+#create usefull data and time columns
+
+#date column
+df$date<-as.Date(with(df,paste(Year,Month,DayofMonth,DayOfWeek, sep="-")),"%Y-%m-%d")
+
+#time column
+df$time_bin <- round((df$DepTime/100), digits= 0)
+df$time <-times(df$DepTime / (100))
+df <- df %>% 
+          mutate(date_time = ymd_hm(paste(date, time)))
+
+#create column with date bins
+df$date_bin <- as.POSIXct(strptime(df$date_time, format = '%Y-%m-%d %H'))
+
+df #explore 
+
+```
+```{r}
+#look for missing values (DepDelay and ArrDelay should be removed due to cancelled&diverted = 0, reference = python_notebook)
+colSums(is.na(df))
+summary(df)
+```
+
+Questions
+
+Question 1.1: 
+When is the best day of the week to fly to minimise delays?
+
+For mean:
+```{r}
+#map months and DayofWeek to corresponding names.
+df$Month_name <- month.abb[df$Month] #month names
+df$DayOfWeek <- recode(df$DayOfWeek, 
+       "1"="Monday",
+       "2"="Tuesday",
+       "3"="Wednesday",
+       "4"="Thursday",
+       "5"="Friday",
+       "6"="Saturday",
+       "7"="Sunday") #weekday names
+
+#create table df
+day_mean <- df[c('DayOfWeek','DepDelay','ArrDelay')] #select columns
+day_mean <- day_mean %>%
+  group_by(DayOfWeek) %>%
+  summarize(Dep_del = mean(DepDelay), Arr_del = mean(ArrDelay)) #group and average
+
+#create columns in new df
+day_mean$avg_delay_day <- ((day_mean$Dep_del+day_mean$Arr_del)/2)
+day_mean$total_avg_delay_day <- ((day_mean$Dep_del+day_mean$Arr_del))
+day_mean %>% 
+group_by(total_avg_delay_day) %>% 
+  arrange((total_avg_delay_day)) #group and arrange
+
+```
+Plots for mean:
+```{r}
+#prep data:
+day_mean_plot <- day_mean %>%
+  select(DayOfWeek, avg_delay_day)%>%
+  group_by(DayOfWeek) %>% 
+  arrange((avg_delay_day)) #group and arrange
+day_mean_plot2 <- melt(day_mean, id.vars='DayOfWeek') #melt for pot 2 and 3
+
+#plot 1
+ggplot(day_mean_plot, aes(x=DayOfWeek, y=avg_delay_day, fill=DayOfWeek, color=DayOfWeek)) +
+        geom_bar(stat='identity') +
+        ylab("avg. delay(min.)") + xlab("Day of Week") +   
+        labs(title = "avg. delay of wekdays") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+#plot2
+ggplot(day_mean_plot2, aes(x=DayOfWeek, y=value, fill=variable)) + 
+        geom_bar(stat='identity') +
+        ylab("distr. minutes") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+#plot3
+ggplot(day_mean_plot2, aes(x=DayOfWeek, y=value, fill=variable)) + 
+       geom_bar(stat='identity', position='dodge') +
+       ylab("Minutes") +
+       theme(axis.text.x=element_text(angle=35,hjust=1))
+```
+
+For total and delay%:
+```{r}
+#create table df for flights
+day_tot <- df[c('DayOfWeek','delay')] #select columns
+day_tot <- day_tot %>%
+  group_by(DayOfWeek) %>%
+  tally %>% arrange(desc(n)) #total arrival delays
+names(day_tot)[names(day_tot) == 'n'] <- 'Flights'
+#create columns in day_tot df
+day_tot$Flights_perc <- ((day_tot$Flights/14007604)*100)
+
+#create table df for delays
+day_tot2 <- df[c('DayOfWeek','DepDelay','ArrDelay')] #select columns
+day_tot2 <- subset(day_tot2, DepDelay > 0 | ArrDelay > 0)
+names(day_tot2)[names(day_tot2) == 'DepDelay'] <- 'Delay_perc'
+day_tot2 <- day_tot2 %>%
+  group_by(DayOfWeek) %>%
+  tally %>% arrange(desc(n)) #total arrival delays
+names(day_tot2)[names(day_tot2) == 'n'] <- 'Delays'
+
+#join
+day_df = left_join(day_tot, day_tot2, by = c("DayOfWeek" = "DayOfWeek"))
+day_df$Delays_perc= (day_df$Delays/day_df$Flights) #create delay in percentage column
+
+day_df #explore
+```
+
+Plots for total and delay%:
+```{r}
+#prep data:
+day_df_plot <- day_df %>%
+  select(DayOfWeek, Delays_perc)%>%
+  group_by(DayOfWeek) %>% 
+  arrange((Delays_perc)) #group and arrange
+
+#plot 
+ggplot(day_df_plot, aes(x=DayOfWeek, y=Delays_perc, fill=DayOfWeek, color=DayOfWeek)) +
+        geom_bar(stat='identity') +
+        ylab("Percentage") + xlab("Day of Week") +     
+        labs(title = "avg. delay of wekdays (in %)") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+```
+The best day to fly to avoid delays is on Saturday or Tuesdays depending on tickets price.
+
+
+Question 1.2
+When is the best time of day to fly to minimise delays?
+```{r}
+#first we create time of day bin categories
+categories<-c('night','before noon','afternoon','evening')
+df$arr_time_bin<-cut(df$ArrTime, seq(0,2400,600),labels=categories)
+df$dep_time_bin<-cut(df$DepTime, seq(0,2400,600),labels=categories)
+
+#create time of day df
+time_day = df[c('DepDelay','dep_time_bin','ArrDelay','arr_time_bin')]
+time_day
+```
+
+```{r}
+#Drop the missing values we found above.
+time_day <- na.omit(time_day)
+```
+
+```{r}
+#create total df's
+arr_tot = time_day  %>% group_by(arr_time_bin) %>% 
+tally %>% arrange(desc(n)) #total arrival delays
+arr_tot #show
+
+dep_tot = time_day  %>% group_by(dep_time_bin) %>% 
+tally %>% arrange(desc(n)) #total departure delays
+dep_tot #show
+```
+The total no. of delays is lowest at night (approx. 70.0000 delays.) But before concluding night is the best time: ets also find the mean delays:
+
+```{r}
+#create df's for mean
+time_arr_mean <- time_day %>%
+  group_by(arr_time_bin) %>%
+  summarize(arr_mean = mean(ArrDelay))
+time_arr_mean #show table
+
+time_dep_mean <- time_day %>%
+  group_by(dep_time_bin) %>%
+  summarize(dep_mean = mean(DepDelay))
+time_dep_mean #show table
+```
+
+```{r}
+#summarize in one table
+
+#time of day column with arr_time_bin & dep_time_bin as variables
+names(time_arr_mean)[names(time_arr_mean) == 'arr_time_bin'] <- 'time_of_day'
+names(time_dep_mean)[names(time_dep_mean) == 'dep_time_bin'] <- 'time_of_day'
+dt_arr <- data.table(time_arr_mean, key = "time_of_day") 
+dt_dep <- data.table(time_dep_mean, key = "time_of_day")
+
+#mean
+time_dep_mean <- dt_arr[dt_dep]
+time_dep_mean$avg_delay_day <- ((time_dep_mean$dep_mean+time_dep_mean$arr_mean)) #avg. del column
+time_dep_mean$total_delay_day <- ((time_dep_mean$dep_mean+time_dep_mean$arr_mean)) #total avg. del column
+
+#group arrange
+time_day_mean <- time_dep_mean %>% 
+group_by(avg_delay_day) %>% 
+  arrange((avg_delay_day)) 
+time_day_mean
+```
+plot average delay in minutes:
+```{r}
+#prep data:
+time_day_mean_plot <- time_day_mean %>%
+  select(time_of_day, avg_delay_day)%>%
+  arrange((avg_delay_day)) #group and arrange
+
+#plot 
+ggplot(time_day_mean_plot, aes(x=time_of_day, y=avg_delay_day, fill=time_of_day)) +
+        geom_bar(stat='identity') +
+        ylab("Percentage") + xlab("Day of Week") +     
+        labs(title = "Percentage of delays by time of day") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+```
+
+Lets also have a look at flights, delay, and delay%
+```{r}
+#create total dep columns
+time_day_dep <- time_day %>% group_by(dep_time_bin) %>% 
+tally %>% arrange(desc(n))
+names(time_day_dep)[names(time_day_dep) == 'n'] <- 'Flights'
+
+#create total arr columns
+time_day_arr <- time_day %>% group_by(arr_time_bin) %>% 
+tally %>% arrange(desc(n))
+names(time_day_arr)[names(time_day_arr) == 'n'] <- 'Flights'
+
+#join
+time_day_tot = left_join(time_day_dep, time_day_arr, by = c("dep_time_bin" = "arr_time_bin"))
+names(time_day_tot)[names(time_day_tot) == 'dep_time_bin'] <- 'TimeofDay'
+time_day_tot$Flights <- time_day_tot$Flights.x+time_day_tot$Flights.y
+time_day_tot<- time_day_tot %>% select('TimeofDay', 'Flights')
+
+#df dep delays columns
+time_day_dep2 <- subset(time_day, DepDelay > 0)
+time_day_dep2 <- time_day_dep2 %>%
+  group_by(dep_time_bin) %>%
+  tally %>% arrange(desc(n)) #total arrival delays
+names(time_day_dep2)[names(time_day_dep2) == 'n'] <- 'Delays'
+
+#df arr delays columns
+time_day_arr2 <- subset(time_day, ArrDelay > 0)
+time_day_arr2 <- time_day_arr2 %>%
+  group_by(arr_time_bin) %>%
+  tally %>% arrange(desc(n)) #total arrival delays
+names(time_day_arr2)[names(time_day_arr2) == 'n'] <- 'Delays'
+
+#join
+time_day_tot2 = left_join(time_day_dep2, time_day_arr2, by = c("dep_time_bin" = "arr_time_bin"))
+names(time_day_tot2)[names(time_day_tot2) == 'dep_time_bin'] <- 'TimeofDay'
+time_day_tot2$Delays <- time_day_tot2$Delays.x+time_day_tot2$Delays.y
+time_day_tot2<- time_day_tot2 %>% select('TimeofDay', 'Delays')
+
+#final join and show table
+time_day_tot3 = left_join(time_day_tot, time_day_tot2, by = c("TimeofDay" = "TimeofDay"))
+time_day_tot3$Delays_perc= (time_day_tot3$Delays/time_day_tot3$Flights) #create delay in percentage column
+time_day_tot3
+```
+
+Plot percentage of delays by time of day:
+```{r}
+#prep data:
+time_day_tot3_plot <- time_day_tot3 %>%
+  select(TimeofDay, Delays_perc)%>%
+  arrange((Delays_perc)) #group and arrange
+
+#plot 
+ggplot(time_day_tot3_plot, aes(x=TimeofDay, y=Delays_perc, fill=TimeofDay)) +
+        geom_bar(stat='identity') +
+        ylab("Percentage") + xlab("Day of Week") +     
+        labs(title = "Percentage of delays by time of day") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+```
+
+The best time to travel to avoid any delays are before noon. Interesting, we can see that our first observation (lowest total number of delays at night) doesn't mean that traveling at night is ultimately the best time as it comes with the risk of much longer delays, if they occur.
+
+Question 1.3
+When is the best time of year to fly to minimise delays?
+```{r}
+#for mean:
+
+#create df with columns of interest
+month_mean <- df[c('Month','DepDelay','ArrDelay')]
+month_mean <- month_mean %>%
+  group_by(Month) %>%
+  summarize(Dep_del = mean(DepDelay), Arr_del = mean(ArrDelay)) #group and avg.
+
+#average columns
+month_mean$avg_delay_day <- ((month_mean$Dep_del+month_mean$Arr_del)/2) #avg. column
+month_mean$tot_avg_delay_day <- (month_mean$Dep_del+month_mean$Arr_del) #tot column
+
+#group and arrange
+month_mean %>% 
+group_by(avg_delay_day) %>% 
+  arrange((avg_delay_day)) 
+```
+```{r}
+#total and delay%
+
+#create df for flight total
+month_tot <- df[c('Month_name','delay')]
+month_tot <- month_tot %>%
+  group_by(Month_name) %>%
+  tally %>% arrange(desc(n)) 
+names(month_tot)[names(month_tot) == 'n'] <- 'Flights'
+month_tot$Flights_perc <-  ((month_tot$Flights/14007604)*100)
+month_tot
+
+#create df for delays
+month_tot2 <- df[c('Month_name','DepDelay','ArrDelay')]
+month_tot2 <- subset(month_tot2, DepDelay > 0 | ArrDelay > 0)
+month_tot2 <- month_tot2 %>%
+  group_by(Month_name) %>%
+  tally %>% arrange(desc(n)) 
+names(month_tot2)[names(month_tot2) == 'n'] <- 'Delays'
+#month_tot$Delays_perc <-  ((month_tot2$delay/14007604)*100)
+month_tot2
+
+#join
+month_tot3 = left_join(month_tot, month_tot2, by = c("Month_name" = "Month_name"))
+month_tot3$Delays_perc = (month_tot3$Delays/month_tot3$Flights) #create delay in percentage column
+month_tot3 <- arrange(month_tot3,Delays_perc) #arrange
+month_tot3
+```
+```{r}
+#delays by month piechart
+pie(month_tot3$Delays, month_tot3$Month_name)
+```
+The best time of year to travel to avoid delays are in September. The christmass and summer holidays are the worst. If we wanted to choose by season, we can do the following:
+```{r}
+#choose months and add
+winter <- month_mean[12, ] + month_mean[1, ]+ month_mean[2, ]
+spring <- month_mean[3, ] + month_mean[4, ]+ month_mean[5, ]
+summer <- month_mean[6, ] + month_mean[7, ]+ month_mean[8, ]
+autumn <- month_mean[9, ] + month_mean[10, ]+ month_mean[11, ]
+
+#print results
+print(paste("Total average delay during the spring: ", spring$tot_avg_delay_day))
+print(paste("Total average delay during the summer: ", summer$tot_avg_delay_day))
+print(paste("Total average delay during the autumn: ", autumn$tot_avg_delay_day))
+print(paste("Total average delay during the winter: ", winter$tot_avg_delay_day))
+```
+Autumn is the season that best avoids delays:
+
+Question 2.
+Do older planes suffer more delays?
+```{r}
+#join df and airplane df
+names(df)[names(df) == 'TailNum'] <- 'tailnum' #match name of variable df airplane
+#join
+df_airplanes <- inner_join(df,
+  select(airplanes, tailnum, year),
+  by = "tailnum"
+)
+
+#edit the joined df
+names(df_airplanes)[names(df_airplanes) == 'year'] <- 'plane_year' #change col name
+df_airplanes$plane_year <- as.numeric(df_airplanes$plane_year) #change plane_year column to numeric
+df_airplanes <- df_airplanes[!is.na(df_airplanes$plane_year),] #Drop NA's
+
+df_airplanes #explore 
+```
+We define a plane old as +20 years (1987) (ref: ttps://www.paramountbusinessjets.com/faq/age-of-aircraft-safety-factor.html)
+
+```{r}
+#add plane_condition column and define category
+df_airplanes <- df_airplanes %>% 
+  mutate(plane_condition = if_else(plane_year <= 1987, "old", "new"))
+
+#total no. of old and new planes
+df_airplanes %>% group_by(plane_condition) %>% 
+tally %>% arrange(desc(n)) #explore with conditions
+```
+There is significant more new planes, so lets look at the mean.  
+```{r}
+#mean delay for old vs. new planes
+plane_mean <- df_airplanes %>%
+  group_by(plane_condition) %>%
+  summarize(delay = mean(delay))
+names(plane_mean)[names(plane_mean) == 'delay'] <- 'Total_avg_delay'
+
+plane_mean #explore
+```
+
+```{r}
+#total for plane condition
+
+#create df for flight total
+plane_tot <- df_airplanes[c('plane_condition','delay')]
+plane_tot <- plane_tot %>%
+  group_by(plane_condition) %>%
+  tally %>% arrange(desc(n)) 
+names(plane_tot)[names(plane_tot) == 'n'] <- 'Flights'
+plane_tot$Flights_perc <- (plane_tot$Flights/(10100221+1232687)*100)
+plane_tot
+
+#create df for delays
+plane_tot2 <- df_airplanes[c('plane_condition','DepDelay','ArrDelay')]
+plane_tot2 <- subset(plane_tot2, DepDelay > 0 | ArrDelay >0)
+plane_tot2 <- plane_tot2 %>%
+  group_by(plane_condition) %>%
+  tally %>% arrange(desc(n)) 
+names(plane_tot2)[names(plane_tot2) == 'n'] <- 'Delays'
+plane_tot2
+
+#join
+plane_tot3 = left_join(plane_tot, plane_tot2, by = c("plane_condition" = "plane_condition"))
+plane_tot3$Delays_perc = (plane_tot3$Delays/plane_tot3$Flights) #create delay in percentage column
+plane_tot3 <- arrange(plane_tot3,Delays_perc) #arrange
+
+#join with mean
+plane_all = left_join(plane_tot3, plane_mean, by = c("plane_condition" = "plane_condition"))
+plane_all #explore
+
+```
+plots:
+```{r}
+#plot 1
+ggplot(plane_mean, aes(x=plane_condition, y=Total_avg_delay, fill=plane_condition, color=plane_condition)) +
+        geom_bar(stat='identity') +
+        ylab("Minutes") + xlab("Plane condition") +     
+        labs(title = "Mean time of delays for planes") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+#plot2
+ggplot(plane_all, aes(x=plane_condition, y=Delays_perc, fill=plane_condition, color=plane_condition)) +
+        geom_bar(stat='identity') +
+        ylab("Percentage") + xlab("Plane condition") +     
+        labs(title = "Percentage of delayed flights") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+```
+
+
+```{r}
+100-(20.44398/20.61757)*100
+```
+The mean delay of old vs new planes is almost identical. New planes only have 0.84% decrease in mean delay. Hence, older does not suffer significant more delays.
+
+Try changing the threshold age to 10 year:
+```{r}
+#Create age categories
+categories<-c('1956-1987(old)','1987-1997(mid)','1997-2007(new)') #categories
+df_airplanes$plane_condition2<-cut(df_airplanes$plane_year, seq(1977,2007,10),labels=categories) #sequence
+df_airplanes$plane_condition2[is.na(df_airplanes$plane_condition2)] = "1956-1987(old)" #set <1987 to old
+#group and arrange
+df_airplanes %>% group_by(plane_condition2) %>% 
+tally %>% arrange(desc(n)) #explore
+```
+
+```{r}
+#again, we take the mean delay for old/mid/new planes 
+plane2_mean <- df_airplanes %>%
+  group_by(plane_condition2) %>%
+  summarize(delay = mean(delay)) #explore the mean
+names(plane2_mean)[names(plane2_mean) == 'delay'] <- 'Total_avg_delay'
+
+plane2_mean
+```
+
+```{r}
+#total for plane condition in 3 bins : old, new, mid
+
+#create df for flight total
+plane2_tot <- df_airplanes[c('plane_condition2','delay')]
+plane2_tot <- plane2_tot %>%
+  group_by(plane_condition2) %>%
+  tally %>% arrange(desc(n)) 
+names(plane2_tot)[names(plane2_tot) == 'n'] <- 'Flights'
+plane2_tot$Flights_perc <- (plane2_tot$Flights/(10100221+1232687)*100)
+plane2_tot
+
+#create df for delays
+plane2_tot2 <- df_airplanes[c('plane_condition2','DepDelay','ArrDelay')]
+plane2_tot2 <- subset(plane2_tot2, DepDelay > 0 | ArrDelay >0)
+plane2_tot2 <- plane2_tot2 %>%
+  group_by(plane_condition2) %>%
+  tally %>% arrange(desc(n)) 
+names(plane2_tot2)[names(plane2_tot2) == 'n'] <- 'Delays'
+plane2_tot2
+
+#join
+plane2_tot3 = left_join(plane2_tot, plane2_tot2, by = c("plane_condition2" = "plane_condition2"))
+plane2_tot3$Delays_perc = (plane2_tot3$Delays/plane2_tot3$Flights) #create delay in percentage column
+plane2_tot3 <- arrange(plane2_tot3,Delays_perc) #arrange
+
+#join with mean
+plane2_all = left_join(plane2_tot3, plane2_mean, by = c("plane_condition2" = "plane_condition2"))
+
+plane2_all
+```
+Plot for old, mid, new bins:
+```{r}
+#plot 1
+ggplot(plane2_mean, aes(x=plane_condition2, y=Total_avg_delay, fill=plane_condition2, color=plane_condition2)) +
+        geom_bar(stat='identity') +
+        ylab("Minutes") + xlab("Plane condition") +     
+        labs(title = "Mean time of delays for planes") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+#plot2
+ggplot(plane2_all, aes(x=plane_condition2, y=Delays_perc, fill=plane_condition2, color=plane_condition2)) +
+        geom_bar(stat='identity') +
+        ylab("Percentage") + xlab("Plane condition") +     
+        labs(title = "Percentage of delayed flights") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+```
+Old planes does not suffer significantly more delay than newer planes. Although there is an interesting increase in delay around the 10 year mark.
+
+Question 3.
+How does the number of people flying between different locations change over time?
+```{r}
+#load data for 11 years with selected columns and count flights. 11 years seems more reasonable for finding changes, rather 
+#than only the initial 2 years used untill now.
+df_97 = read.csv("1997.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y1997 = n()) %>%
+  arrange(desc(y1997)) %>%
+  collect()
+
+df_98 = read.csv("1998.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y1998 = n()) %>%
+  arrange(desc(y1998)) %>%
+  collect()
+
+df_99 = read.csv("1999.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y1999 = n()) %>%
+  arrange(desc(y1999)) %>%
+  collect()
+
+df_00 = read.csv("2000.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2000 = n()) %>%
+  arrange(desc(y2000)) %>%
+  collect()
+
+df_01 = read.csv("2001.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2001 = n()) %>%
+  arrange(desc(y2001)) %>%
+  collect()
+
+df_02 = read.csv("2002.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2002 = n()) %>%
+  arrange(desc(y2002)) %>%
+  collect()
+
+df_03 = read.csv("2003.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2003 = n()) %>%
+  arrange(desc(y2003)) %>%
+  collect
+
+df_04 = read.csv("2004.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2004 = n()) %>%
+  arrange(desc(y2004)) %>%
+  collect()
+
+df_05 = read.csv("2005.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2005 = n()) %>%
+  arrange(desc(y2005)) %>%
+  collect()
+
+df_06 = read.csv("2006.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2006 = n()) %>%
+  arrange(desc(y2006)) %>%
+  collect()
+
+df_07 = read.csv("2007.csv")[ ,c("Origin", "Dest", "Year")] %>%
+  group_by(Origin, Dest) %>%
+  summarise(y2007 = n()) %>%
+  arrange(desc(y2007)) %>%
+  collect()
+```
+
+```{r}
+#merge all the dataframes
+dataframes <- list(df_97, df_98,df_99, df_00,df_01, df_02,df_03, df_04,df_05, df_06, df_07)
+df_locations <- purrr::reduce(.x = dataframes, merge, by = c("Origin", "Dest"), all = T)
+head(df_locations,10)
+```
+
+```{r}
+#clean the new df
+
+#replace nan with 0, = no flights
+df_locations <- df_locations %>%
+  mutate_all(funs(ifelse(is.na(.), 0, .))) 
+
+df_locations$Total <- rowSums(df_locations[,3:13] ) #create new total col
+df_locations <- df_locations %>% arrange(desc(Total)) #arrange
+df_locations <- head(df_locations,20) #select only top 20 
+df_locations
+```
+
+```{r}
+#add locations together:
+con1 <- df_locations[1,3:14] + df_locations[2,3:14]
+con1$connection = c("LAS&LAX")
+con1 <- con1 %>%
+  select(connection, everything())
+
+con2 <- df_locations[3,3:14] + df_locations[4,3:14]
+con2$connection = c("PHX&LAX")
+con2 <- con2 %>%
+  select(connection, everything())
+
+con3 <- df_locations[5,3:14] + df_locations[6,3:14]
+con3$connection = c("SFO&LAX")
+con3 <- con3 %>%
+  select(connection, everything())
+
+con4  <- df_locations[7,3:14] + df_locations[8,3:14]
+con4$connection = c("ORD&MSP")
+con4 <- con4 %>%
+  select(connection, everything())
+
+con5  <- df_locations[9,3:14] + df_locations[10,3:14]
+con5$connection = c("PHX&LAS")
+con5 <- con5 %>%
+  select(connection, everything())
+
+con6  <- df_locations[11,3:14] + df_locations[12,3:14]
+con6$connection = c("LGA&ORD")
+con6 <- con6 %>%
+  select(connection, everything())
+
+con7  <- df_locations[13,3:14] + df_locations[19,3:14]
+con7$connection = c("HOU&DAL")
+co7n <- con7 %>%
+  select(connection, everything())
+
+con8  <- df_locations[14,3:14] + df_locations[15,3:14]
+con8$connection = c("OAK&LAX")
+con8 <- con8 %>%
+  select(connection, everything())
+
+con9  <- df_locations[16,3:14] + df_locations[20,3:14]
+con9$connection = c("EWR&ORD")
+con9 <- con9 %>%
+  select(connection, everything())
+
+con10  <- df_locations[17,3:14] + df_locations[18,3:14]
+con10$connection = c("BOS&LGA")
+con10 <- con10 %>%
+  select(connection, everything())
+
+dataframes2 <- list(con1,con2,con3,con4,con5,con6,con7,con8,con9,con10) #select frames
+df_locations2 <- purrr::reduce(.x = dataframes2, merge, all = T) #merge 
+
+df_locations2 <- df_locations2 %>% arrange(desc(Total)) #arrange
+df_locations2 #explore
+```
+
+```{r}
+# add total by year row
+library(janitor)
+df_locations3 <- df_locations2 %>%
+  adorn_totals("row")
+df_locations3
+```
+We can see that people flying between locations have generally fallen from 1997 to 2007, with a noticeable decrease in 2001 due to 9/11.
+
+plot a map over connections
+```{r}
+#create df's needed for a map plot
+
+#count connections
+connections <- df_locations %>%
+  group_by(Origin, Dest,Total) %>%
+  summarise(n = sum(Total)) %>%
+  arrange(desc(Total)) %>%
+  collect()
+
+#manuel rank
+rank_list= c(1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10)
+connections$rank <-rank_list
+connections
+
+#2nd df with lat and long data from airports ds for line between airports
+connections2 = left_join(connections, airports, by = c("Origin" = "iata")) %>%
+  select(Origin, Dest, n, Origin_Lat = lat, Origin_Long = long) %>%
+  left_join(airports, by = c("Dest" = "iata")) %>%
+  select(Origin, Dest, n, Origin_Lat, Origin_Long, Dest_Lat = lat, Dest_Long = long)
+
+#3nd df for the labels of airports
+connections3_1 = connections %>%
+  group_by(Origin) %>%
+  summarise(n = sum(n)) %>%
+  arrange(desc(n))
+#join
+connections3 = left_join(connections3_1, airports, by = c("Origin" = "iata")) %>%
+  select(Origin, n, Origin_Lat = lat, Origin_Long = long)
+conections3 <- within(connections3, rm(n)) #remove n column
+```
+```{r}
+#plot the maps with df created above
+
+connections %>%
+  filter() %>%
+  group_by(Origin, Dest) %>%
+  #summarise(n = sum(n, na.rm = TRUE)) %>%
+  inner_join(airports, by = c("Dest" = "iata")) %>%
+  ggplot(aes(y = lat, x = long)) +
+  borders("state", fill = "lightgrey") +
+  geom_point(aes(colour = rank), alpha = 0.4, size = 7) + 
+  ggtitle("Map of US flights between locations (1997-2007)") +theme(plot.title = element_text(hjust = 0.5)) +
+  geom_segment(data = connections2,
+              mapping = aes(x = Origin_Long, y = Origin_Lat, xend = Dest_Long, yend = Dest_Lat),
+              alpha = 1, colour = "orange", size = 0.8) +
+  geom_label_repel(aes(x = Origin_Long, y = Origin_Lat, label = Origin), data = connections3) +
+  coord_map(xlim = c(-125, -65), ylim = c(25, 50))+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        legend.position="none")
+  #ggsave("Q3_1.png")
+```
+
+Let's explore the data further with more plots:
+```{r}
+#data prep
+df_locations2_plot <- df_locations2[,1:12] #plot 1 data
+df_locations2_plot2 <- df_locations2 %>%
+  select(connection,y1997, y2001, y2002, y2007) #plot 2 data
+df_locations2_plot3 <- df_locations3[11,1:12] #plot 3 data
+
+#plot 4: 2001 exploration
+df_01_2 = read.csv("2001.csv")[ ,c("Origin", "Dest", "Month")] %>%
+  group_by(Month) %>%
+  summarise(y2001 = n()) %>%
+  arrange(Month) %>%
+  collect()
+df_01_2$Month_name <- month.abb[df_01_2$Month]
+
+#melt 
+df_locate <- melt(df_locations2_plot, id.vars='connection') #melt 1 data
+df_locate2 <- melt(df_locations2_plot2, id.vars='connection') #melt 2 data
+df_locate3 <- melt(df_locations2_plot3, id.vars='connection') #melt 3 data
+
+
+ggplot(df_locate, aes(x=connection, y=value, fill=variable)) + 
+        geom_bar(stat='identity') +
+        ylab("Count") +
+        theme(axis.text.x=element_text(angle=35,hjust=1))
+
+ggplot(df_locate2, aes(x=connection, y=value, fill=variable)) + 
+       geom_bar(stat='identity', position='dodge') +
+       ylab("Count") +
+       theme(axis.text.x=element_text(angle=35,hjust=1))
+
+ggplot(df_locate3, aes(x=variable, y=value, group= 1)) + 
+       geom_line(color = 4, size = 1.3) +
+       ggtitle("Total no. of flights between locations (1997-2007)") +
+       xlab("Year") +
+       ylab("Total no. of flights") +
+       theme_minimal()+ 
+       theme(
+       plot.title=element_text( hjust=0.5, vjust=0.5)) 
+#ggsave("Q3_2.png", bg = "#FFFFFF")
+
+ggplot(df_01_2, aes(x=Month_name, y=y2001, group= 1)) + 
+       geom_line(color = 4, size = 1.3) + scale_x_discrete(limits = month.abb)+
+       ggtitle("Exploration of drop in 2001") +
+       xlab("Month") +
+       ylab("Total no. of flights") +
+       theme_minimal()+ 
+       theme(
+       plot.title=element_text( hjust=0.5, vjust=0.5)) 
+
+```
+
+Question 4.
+Can you detect cascading failures as delays in one airport create delays in others?
+```{r}
+#create df's for two airports las vegas and los angeles
+
+df_airport <- df
+
+#create las vegas df
+df_LAS <- subset(df_airport, Origin == "LAS" & Dest =="LAX")
+
+df_LAS <- df_LAS %>%
+  select(Origin,DepDelay,Dest,DepTime,ArrDelay,date_bin,date_time)
+
+df_LAS$DepDelay <-as.numeric(df_LAS$DepDelay > 0)
+df_LAS$ArrDelay <-as.numeric(df_LAS$ArrDelay > 0)
+
+df_LAS <- subset(df_LAS, ArrDelay == 1)
+df_LAS <- arrange(df_LAS, date_time)
+
+input_time <- df_LAS$date_bin
+
+df_LAS$date_bin <-  input_time + lubridate::hours(1) # add 1 hour to bin (due to the flight is around 1h, so we need the impact on the later bin for next df)
+df_LAS$date_bin <- as.character(df_LAS$date_bin)
+df_LAS$date_time <- as.character(df_LAS$date_time)
+df_LAS$DepDelay <- as.integer(df_LAS$DepDelay)
+
+#group the df by date 
+df_LAS_group <- df_LAS %>%
+  group_by(date_bin) %>%
+  summarize(delay_in_A = sum(ArrDelay))
+
+df_LAS
+df_LAS_group
+```
+
+```{r}
+#create Los Angeles to all other airports
+df_LAX <- subset(df_airport, Origin == "LAX" & Dest =="LAS")
+
+df_LAX <- df_LAX %>%
+  select(Origin,DepDelay,Dest,ArrDelay,DepTime,date_bin, date_time)
+
+df_LAX$DepDelay <-as.numeric(df_LAX$DepDelay > 0)
+df_LAX$ArrDelay <-as.numeric(df_LAX$ArrDelay > 0)
+
+df_LAX <- subset(df_LAX, DepDelay == 1 & ArrDelay == 1)
+df_LAX <- arrange(df_LAX, date_time)
+
+df_LAX$date_bin <- as.character(df_LAX$date_bin)
+df_LAX$date_time <- as.character(df_LAX$date_time)
+df_LAX$DepDelay <- as.integer(df_LAX$DepDelay)
+
+df_LAX_group <- df_LAX %>%
+  group_by(date_bin) %>%
+  summarize(delay_in_B_and_C = sum(DepDelay, ArrDelay)/2)
+
+df_LAX
+df_LAX_group
+```
+```{r}
+#join on date bin
+airport_A_B_A <- inner_join(df_LAX_group, df_LAS_group, by= "date_bin")
+airport_A_B_A
+```
+
+```{r}
+#select only where delay in airport B&C is bigger or equal to airport A delay!
+airport_A_B_A <- subset(airport_A_B_A, delay_in_B_and_C >= delay_in_A)
+colSums(airport_A_B_A[,3]) #count no of cascading failures
+airport_A_B_A 
+```
+
+```{r}
+#cascading delay percentage of total flights on the route
+3659/26014*100
+```
+We can detect 3661 cascading delay failures for airport A (LAS) that creates delays in airport B (LAX) and C (LAS again), approx 14.1% of all the flights leads to cascading delays. 
+
+
+Let's also try for delay in LAS(A), that create delay in LAX(B) and then in all other airports(C).
+```{r}
+#create Los Angeles to all other airports
+df_LAX_all <- subset(df_airport, Origin == "LAX")
+
+df_LAX_all <- df_LAX_all %>%
+  select(Origin,DepDelay,Dest,ArrDelay,DepTime,date_bin, date_time)
+
+df_LAX_all$DepDelay <-as.numeric(df_LAX_all$DepDelay > 0)
+df_LAX_all$ArrDelay <-as.numeric(df_LAX_all$ArrDelay > 0)
+
+df_LAX_all <- subset(df_LAX_all, DepDelay == 1 & ArrDelay == 1)
+df_LAX_all <- arrange(df_LAX_all, date_time)
+
+df_LAX_all$date_bin <- as.character(df_LAX_all$date_bin)
+df_LAX_all$date_time <- as.character(df_LAX_all$date_time)
+df_LAX_all$DepDelay <- as.integer(df_LAX_all$DepDelay)
+
+df_LAX_all_group <- df_LAX_all %>%
+  group_by(date_bin) %>%
+  summarize(delay_in_B_and_C = sum(DepDelay, ArrDelay)/2)
+
+df_LAX_all
+df_LAX_all_group
+```
+
+```{r}
+#join on date bin
+airport_A_B_C <- inner_join(df_LAX_all_group, df_LAS_group, by= "date_bin")
+airport_A_B_C
+```
+```{r}
+#select only where delay_in_a is smaller, there should be less filtered out this time according to the data above.
+airport_A_B_C <- subset(airport_A_B_C, delay_in_B_and_C >= delay_in_A)
+colSums(airport_A_B_C[,3]) #count no of cascading failures
+airport_A_B_C 
+```
+```{r}
+#tot percentage of the flights from A->B->C
+12866/455560*100
+```
+We can detect 12894 cascading failures for airport A (LAS) that creates delays in airport B & C (LAX and all others), approx 2.83% of all the flights leads to cascading delays. 
+
+
+Question 5.
+Use the available variables to construct a model that predicts delays
+```{r}
+#create df for ml (we use df1 and df2 where cancelled and diverted are excluded)
+df_ml <- df1 %>% full_join(df2) #join dfs for ml
+
+#prepare for model
+df_ml$delay <- (df_ml$ArrDelay+df_ml$DepDelay) #create delay column
+df_ml$delay_binary <- ifelse(df_ml$delay>0, 1, 0) #create target column in binary. 0 = on time, 1 = delay.
+df_ml <- df_ml[, which(names(df_ml) != "delay")] #drop delay column
+df_ml <- sample_n(df_ml, 250000) #sample due to computational limitations
+df_ml$delay_binary <- as.factor(df_ml$delay_binary) # convert target column to factor
+
+df_ml #explore
+```
+
+```{r}
+#load random forest library (we know from the python notebook that it performs well)
+library(randomForest)
+
+#splitting into training and test set(80/20)
+set.seed(100)
+ml_training_set <- sample(nrow(df_ml), 0.8*nrow(df_ml), replace = FALSE)
+X <- df_ml[ml_training_set,]
+Y <- df_ml[-ml_training_set,]
+
+#create model
+ml_model <- randomForest(delay_binary ~ ., data = X, importance = TRUE)
+ml_model
+
+
+#predictions
+pred <- predict(ml_model, Y, type = "class") #classification predictions
+pred <- mean(pred == Y$delay_binary) #target mean
+print(paste("Random Forrest model prediction : ",pred))
+
+#plots
+
+#class error over amount of trees
+#png('Q5_1.png') # create png
+plot(ml_model,lwd=1, main="Class error over no. of trees")
+#dev.off() #save png
+
+#roc curve
+library(ROCR) #load roc curve library for prediction and plotting
+#png('Q5_2.png') # create png
+pred2 = predict(ml_model,type = "prob") #predict with probability
+pred2 = prediction(pred2[,2], X$delay_bin)
+pred2 = performance(pred2, 'tpr','fpr') #use performance function from ROCR library
+plot(pred2,lwd=2,col=4,main="Binary Random Forest model in R") #set linewidth, color, title and  plot.
+#dev.off() #save png
+
+```
+
+
+
+
+
+
+
+
+
+
+
