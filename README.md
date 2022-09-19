@@ -3,5 +3,5 @@
 ##### Part of BSc Data Science & Business Analytics degree
 
 ### Grades:
-##### Exam: First Class
 ##### Project: First Class
+##### Overall: First Class
